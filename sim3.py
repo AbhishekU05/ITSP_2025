@@ -1,103 +1,99 @@
 import pybullet as p
 import pybullet_data
-import numpy as np
 import time
-import random
+import numpy as np
 
+# Initialize PyBullet in GUI mode
 p.connect(p.GUI)
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
-p.setGravity(0, 0, -9.8)
+p.setGravity(0, 0, -9.81)
+p.loadURDF("plane.urdf")
 
-plane = p.loadURDF("plane.urdf")
+# Camera setup (top-down)
+p.resetDebugVisualizerCamera(cameraDistance=8,
+                             cameraYaw=0,
+                             cameraPitch=-89.999,
+                             cameraTargetPosition=[0, 0, 0])
 
 # Parameters
-num_bots = 10
-bots = []
-radius = 0.05
-height = 0.1
-start_area = 2.0
-region_radius = 0.5
+num_bots = 3
+bot_radius = 0.1
+bot_height = 0.2
+min_dist = 0.7  # Minimum allowed distance between bots (70 cm)
+speed = 0.01
+start_positions = [(-2, -5), (0, -5), (2, -5)]  # red, green, blue start
+target_positions = [(2, 1), (0, 1), (-2, 1)]    # red, green, blue target
+bot_colors = [
+    [1, 0, 0, 1],  # Red
+    [0, 1, 0, 1],  # Green
+    [0, 0, 1, 1],  # Blue
+]
 
-# Create 10 bots with identical color
-for _ in range(num_bots):
-    start_x = random.uniform(-start_area, start_area)
-    start_y = random.uniform(-start_area, start_area)
-    col = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height=height)
-    vis = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length=height, rgbaColor=[0.3, 0.7, 1, 1])
+# Priority: blue (highest=0), red (medium=1), green (lowest=2)
+# Since bot order is red(0), green(1), blue(2), assign accordingly:
+priority = [1, 2, 0]  # indices correspond to bot indices
+
+bot_ids = []
+
+# Create bots with color
+for i, pos in enumerate(start_positions):
+    colShape = p.createCollisionShape(p.GEOM_CYLINDER, radius=bot_radius, height=bot_height)
+    visShape = p.createVisualShape(p.GEOM_CYLINDER, radius=bot_radius, length=bot_height, rgbaColor=bot_colors[i])
     bot_id = p.createMultiBody(baseMass=1,
-                               baseCollisionShapeIndex=col,
-                               baseVisualShapeIndex=vis,
-                               basePosition=[start_x, start_y, height / 2])
-    bots.append(bot_id)
+                               baseCollisionShapeIndex=colShape,
+                               baseVisualShapeIndex=visShape,
+                               basePosition=[pos[0], pos[1], bot_height / 2])
+    bot_ids.append(bot_id)
 
-target_position = np.array([0, 0])
+def get_bot_positions(bot_ids):
+    """Returns Nx2 numpy array of bot XY positions."""
+    return np.array([p.getBasePositionAndOrientation(bid)[0][:2] for bid in bot_ids])
 
-# ---- Mouse Interaction ----
+def move_bots_with_priority(bot_ids, targets, speed, min_dist, priority):
+    positions = get_bot_positions(bot_ids)
+    for i, bot_id in enumerate(bot_ids):
+        current = positions[i]
+        target = np.array(targets[i])
+        direction = target - current
+        dist_to_target = np.linalg.norm(direction)
+        if dist_to_target < 0.01:
+            continue
+        direction = direction / dist_to_target
 
-def get_mouse_click_position():
-    keys = p.getKeyboardEvents()
-    if ord('g') in keys and keys[ord('g')] & p.KEY_WAS_TRIGGERED:
-        cam = p.getDebugVisualizerCamera()
-        width, height, view_matrix, proj_matrix = cam[0], cam[1], cam[2], cam[3]
+        repulsion = np.zeros(2)
+        must_yield = False
 
-        mouse_events = p.getMouseEvents()
-        for event in mouse_events:
-            if event[0] == p.MOUSE_BUTTON_LEFT and event[3] & p.KEY_WAS_TRIGGERED:
-                mouse_x = event[1]
-                mouse_y = event[2]
-                ray_start, ray_end = p.computeViewRay(mouse_x, mouse_y)
-                hit = p.rayTest(ray_start, ray_end)[0]
-                if hit[0] != -1:
-                    return np.array(hit[3][:2])
-    return None
+        for j, other_pos in enumerate(positions):
+            if i != j:
+                diff = current - other_pos
+                dist = np.linalg.norm(diff)
+                if dist < min_dist and dist > 0:
+                    # Yield if other bot has higher priority
+                    if priority[j] < priority[i]:
+                        must_yield = True
+                    repulsion += (diff / dist) * (1 - dist / min_dist)
 
-# ---- Helper ----
-
-def get_bot_positions():
-    return np.array([p.getBasePositionAndOrientation(bot)[0][:2] for bot in bots])
-
-def compute_priority_order(positions, target):
-    dists = [np.linalg.norm(pos - target) for pos in positions]
-    return np.argsort(dists)  # bots closer to target have higher priority
-
-def move_bots(positions, target, priorities):
-    new_vels = []
-    for i, pos in enumerate(positions):
-        if np.linalg.norm(pos - target) < region_radius:
-            vel = np.array([0, 0])
+        if must_yield:
+            # Yield by reducing speed drastically or stopping
+            move_vec = repulsion
+            if np.linalg.norm(move_vec) > 0:
+                move_vec = move_vec / np.linalg.norm(move_vec) * (speed * 0.1)
+            else:
+                move_vec = np.zeros(2)
         else:
-            direction = (target - pos)
-            norm = np.linalg.norm(direction)
-            direction = direction / norm if norm > 0 else np.zeros_like(direction)
-            vel = direction
+            # Normal movement with repulsion to keep distance
+            move_vec = direction + repulsion * 0.5
+            if np.linalg.norm(move_vec) > 0:
+                move_vec = move_vec / np.linalg.norm(move_vec) * speed
+            else:
+                move_vec = np.zeros(2)
 
-            # Repulsion from higher-priority bots
-            for j in priorities[:np.where(priorities == i)[0][0]]:
-                other_pos = positions[j]
-                dist = np.linalg.norm(pos - other_pos)
-                if dist < 0.3 and dist > 1e-2:
-                    repulsion = (pos - other_pos) / dist * 0.5
-                    vel += repulsion
+        new_pos = current + move_vec
+        p.resetBasePositionAndOrientation(bot_id, [new_pos[0], new_pos[1], bot_height / 2], [0, 0, 0, 1])
 
-        vel = np.clip(vel, -1, 1)
-        new_vels.append(vel)
-
-    for bot, vel in zip(bots, new_vels):
-        current_z = p.getBasePositionAndOrientation(bot)[0][2]
-        p.resetBaseVelocity(bot, linearVelocity=[vel[0], vel[1], 0])
-
-# ---- Main Loop ----
-
-while True:
-    click = get_mouse_click_position()
-    if click is not None:
-        target_position = click
-        print("New target:", target_position)
-
-    bot_positions = get_bot_positions()
-    priority_order = compute_priority_order(bot_positions, target_position)
-    move_bots(bot_positions, target_position, priority_order)
-
+# Simulation loop
+for _ in range(1000):
+    move_bots_with_priority(bot_ids, target_positions, speed, min_dist, priority)
     p.stepSimulation()
-    time.sleep(1.0 / 240)
+    time.sleep(1. / 240.)
 
