@@ -233,6 +233,7 @@ class MarkerTracker:
 # MAIN FUNCTION
 def main():
     global ESP32_IP
+    frame_skip = 5 # Number of frames we will skip in between 
     
     # Find ESP32 on network
     ESP32_IP = find_esp32_ip()
@@ -306,8 +307,8 @@ def main():
                     elif marker_id in BOT_IDS:
                         bot_trackers[marker_id].update(center, direction)
             
-            # Process navigation only if target is active
-            if target_tracker.is_active():
+            # Process navigation only if target is active and every {frame_skip} frames
+            if target_tracker.is_active() && frame_count % frame_skip == 0:
                 target_pos = target_tracker.get_smoothed_position()
                 print(f"[TARGET] Active | Position: {target_pos}")
                 
@@ -368,6 +369,8 @@ def main():
                                 tracker.last_command = "STOP"
                 else:
                     print("[NAV] Target position is None!")
+            elif frame_count % frame_skip != 0:
+                continue
             else:
                 print("[TARGET] Inactive or lost")
                 # Target not detected - stop all bots
